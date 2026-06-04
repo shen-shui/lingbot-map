@@ -320,6 +320,22 @@ The output directory contains:
 Use `--export_point_stride` to control PLY density and `--conf_threshold` to
 control confidence filtering.
 
+### Generating a Fixed-Height Wall-Density Baseline
+
+After exporting `predictions.npz`, generate top-down density maps for the full
+point cloud and low, middle, and high horizontal slices:
+
+```bash
+python scripts/generate_wall_density.py \
+    --predictions outputs/scene_name/predictions.npz \
+    --output-dir outputs/scene_name/wall_density_baseline
+```
+
+The primary output is `density_wall_fused.png`, a confidence-filtered,
+cross-height wall-density baseline that tolerates small alignment differences
+between height slices. The directory also contains each individual slice,
+cross-height support, raw count arrays, and a strict-consistency diagnostic.
+
 ### Performance & Memory
 
 #### Without FlashInfer (SDPA fallback)
