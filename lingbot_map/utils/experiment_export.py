@@ -154,6 +154,8 @@ def export_experiment_outputs(
     images_array = _to_numpy(images)
     if images_array is None:
         raise ValueError("images must be a NumPy array or CPU tensor")
+    if images_array.ndim == 5 and images_array.shape[0] == 1:
+        images_array = images_array[0]
     if images_array.ndim == 4 and images_array.shape[1] == 3:
         images_hwc = images_array.transpose(0, 2, 3, 1)
     elif images_array.ndim == 4 and images_array.shape[-1] == 3:
