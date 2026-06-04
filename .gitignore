@@ -15,6 +15,7 @@ skyseg.onnx
 weights/
 checkpoints/
 outputs/
+data/
 .DS_Store
 **/.DS_Store
 docs/

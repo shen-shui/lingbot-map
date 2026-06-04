@@ -20,8 +20,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--density-info", type=Path)
     parser.add_argument("--density", type=Path)
+    parser.add_argument("--trajectory", type=Path)
     parser.add_argument("--connection-kernel", type=int, default=15)
     parser.add_argument("--approximation-epsilon", type=float, default=0.005)
+    parser.add_argument("--auto-manhattan", action="store_true")
+    parser.add_argument("--minimum-area-ratio", type=float, default=0.02)
+    parser.add_argument("--minimum-trajectory-coverage", type=float, default=0.5)
     return parser.parse_args()
 
 
@@ -32,8 +36,12 @@ def main() -> None:
         args.output_dir,
         density_info_path=args.density_info,
         density_path=args.density,
+        trajectory_path=args.trajectory,
         connection_kernel=args.connection_kernel,
         approximation_epsilon=args.approximation_epsilon,
+        auto_manhattan=args.auto_manhattan,
+        minimum_area_ratio=args.minimum_area_ratio,
+        minimum_trajectory_coverage=args.minimum_trajectory_coverage,
     )
     area = metadata["world_area"]
     area_text = f", reconstruction area={area:.3f}" if area is not None else ""

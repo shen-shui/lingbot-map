@@ -372,6 +372,26 @@ area, and interior-region IoU. Since monocular reconstruction has no absolute
 metric scale by default, the reported world area is in reconstruction
 coordinate units squared rather than square meters.
 
+For real videos whose room axes are rotated in the density image, enable
+Manhattan alignment and use the reconstructed camera trajectory to reject
+small furniture-generated enclosed regions:
+
+```bash
+python scripts/generate_floorplan_polygon.py \
+    --wall-mask outputs/scene_name/wall_lines_baseline/wall_candidate_mask.npy \
+    --density outputs/scene_name/wall_density_baseline/density_wall_fused.npy \
+    --density-info outputs/scene_name/wall_density_baseline/density_info.json \
+    --trajectory outputs/scene_name/trajectory.txt \
+    --auto-manhattan \
+    --connection-kernel 51 \
+    --minimum-area-ratio 0.05 \
+    --minimum-trajectory-coverage 0.5 \
+    --output-dir outputs/scene_name/floorplan_polygon_guided
+```
+
+The guided mode rejects the result when no sufficiently large enclosed region
+contains at least the requested fraction of valid trajectory points.
+
 ### Evaluating and Calibrating Floorplans
 
 Evaluate a predicted polygon against a ground-truth JSON that uses the same
