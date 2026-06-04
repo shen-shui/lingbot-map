@@ -68,18 +68,30 @@ def _save_point_cloud(
     images: np.ndarray,
     confidence_threshold: float,
     stride: int,
-) -> int:
+) -> tuple[int, str | None]:
     points = _to_numpy(predictions.get("world_points"))
     confidence = _to_numpy(
         predictions.get("world_points_conf", predictions.get("depth_conf"))
     )
-    if points is None or confidence is None:
-        return 0
-
     stride = max(1, int(stride))
-    points = points[:, ::stride, ::stride]
-    confidence = confidence[:, ::stride, ::stride]
     colors = images[:, ::stride, ::stride]
+
+    point_source = "world_points"
+    if points is not None:
+        points = points[:, ::stride, ::stride]
+    else:
+        depth = _to_numpy(predictions.get("depth"))
+        extrinsic = _to_numpy(predictions.get("extrinsic"))
+        intrinsic = _to_numpy(predictions.get("intrinsic"))
+        if depth is None or extrinsic is None or intrinsic is None:
+            return 0, None
+        points = _unproject_depth_strided(depth, extrinsic, intrinsic, stride)
+        point_source = "depth_unprojection"
+
+    if confidence is None:
+        confidence = np.ones(points.shape[:-1], dtype=np.float32)
+    else:
+        confidence = confidence[:, ::stride, ::stride]
 
     points = points.reshape(-1, 3).astype(np.float32, copy=False)
     confidence = confidence.reshape(-1).astype(np.float32, copy=False)
@@ -95,18 +107,60 @@ def _save_point_cloud(
     points, colors, confidence = points[valid], colors[valid], confidence[valid]
 
     _write_binary_ply(output_path, points, colors, confidence)
-    return int(points.shape[0])
+    return int(points.shape[0]), point_source
 
 
-def _save_trajectory(output_path: Path, extrinsic: np.ndarray) -> None:
+def _unproject_depth_strided(
+    depth: np.ndarray,
+    world_to_camera: np.ndarray,
+    intrinsic: np.ndarray,
+    stride: int,
+) -> np.ndarray:
+    if depth.ndim == 4 and depth.shape[-1] == 1:
+        depth = depth[..., 0]
+
+    frame_points = []
+    for frame_idx in range(depth.shape[0]):
+        frame_depth = depth[frame_idx, ::stride, ::stride]
+        height, width = depth.shape[1:3]
+        v, u = np.meshgrid(
+            np.arange(0, height, stride),
+            np.arange(0, width, stride),
+            indexing="ij",
+        )
+        intr = intrinsic[frame_idx]
+        x = (u - intr[0, 2]) * frame_depth / intr[0, 0]
+        y = (v - intr[1, 2]) * frame_depth / intr[1, 1]
+        camera_points = np.stack((x, y, frame_depth), axis=-1)
+
+        rotation = world_to_camera[frame_idx, :3, :3]
+        translation = world_to_camera[frame_idx, :3, 3]
+        world_points = (camera_points - translation) @ rotation
+        frame_points.append(world_points.astype(np.float32, copy=False))
+
+    return np.stack(frame_points, axis=0)
+
+
+def _world_to_camera_to_camera_to_world(extrinsic: np.ndarray) -> np.ndarray:
+    rotation = extrinsic[:, :3, :3]
+    translation = extrinsic[:, :3, 3]
+    camera_to_world = np.tile(np.eye(4, dtype=np.float32), (len(extrinsic), 1, 1))
+    camera_to_world[:, :3, :3] = np.transpose(rotation, (0, 2, 1))
+    camera_to_world[:, :3, 3] = -np.einsum(
+        "sji,sj->si", rotation, translation
+    )
+    return camera_to_world
+
+
+def _save_trajectory(output_path: Path, camera_to_world: np.ndarray) -> None:
     with output_path.open("w", encoding="utf-8") as f:
         f.write("# frame_idx and row-major 3x4 camera-to-world matrix\n")
-        for i, pose in enumerate(extrinsic):
+        for i, pose in enumerate(camera_to_world[:, :3]):
             values = " ".join(f"{float(v):.10f}" for v in pose.reshape(-1))
             f.write(f"{i} {values}\n")
 
 
-def _save_trajectory_plot(output_path: Path, extrinsic: np.ndarray) -> bool:
+def _save_trajectory_plot(output_path: Path, camera_to_world: np.ndarray) -> bool:
     try:
         import matplotlib
 
@@ -115,7 +169,7 @@ def _save_trajectory_plot(output_path: Path, extrinsic: np.ndarray) -> bool:
     except ImportError:
         return False
 
-    centers = extrinsic[:, :3, 3]
+    centers = camera_to_world[:, :3, 3]
     fig, ax = plt.subplots(figsize=(7, 7))
     ax.plot(centers[:, 0], centers[:, 2], "-o", linewidth=1.2, markersize=2)
     ax.scatter(centers[0, 0], centers[0, 2], c="green", label="start", zorder=3)
@@ -172,7 +226,7 @@ def export_experiment_outputs(
         images_uint8 = images_hwc.clip(0, 255).astype(np.uint8, copy=False)
     np.save(output_dir / "images.npy", images_uint8)
 
-    point_count = _save_point_cloud(
+    point_count, point_source = _save_point_cloud(
         output_dir / "point_cloud.ply",
         arrays,
         images_hwc,
@@ -184,16 +238,22 @@ def export_experiment_outputs(
     trajectory_plot_saved = False
     extrinsic = arrays.get("extrinsic")
     if extrinsic is not None:
-        _save_trajectory(output_dir / "trajectory.txt", extrinsic)
+        camera_to_world = _world_to_camera_to_camera_to_world(extrinsic)
+        _save_trajectory(output_dir / "trajectory.txt", camera_to_world)
         trajectory_saved = True
         trajectory_plot_saved = _save_trajectory_plot(
-            output_dir / "trajectory.png", extrinsic
+            output_dir / "trajectory.png", camera_to_world
         )
 
     metadata = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_paths": [str(p) for p in source_paths],
         "run_config": run_config,
+        "coordinate_conventions": {
+            "predictions_extrinsic": "world_to_camera_opencv",
+            "trajectory": "camera_to_world_opencv",
+            "point_cloud": "world_coordinates",
+        },
         "arrays": {
             key: {"shape": list(value.shape), "dtype": str(value.dtype)}
             for key, value in arrays.items()
@@ -204,6 +264,7 @@ def export_experiment_outputs(
             "images": "images.npy",
             "point_cloud": "point_cloud.ply" if point_count else None,
             "point_count": point_count,
+            "point_source": point_source,
             "point_stride": max(1, int(point_stride)),
             "confidence_threshold": float(confidence_threshold),
             "trajectory": "trajectory.txt" if trajectory_saved else None,
