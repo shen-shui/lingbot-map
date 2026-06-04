@@ -354,6 +354,24 @@ transform, and merges nearby Manhattan segments. `wall_lines.json` contains
 pixel and world-coordinate segments; `wall_lines_overlay.png` visualizes raw
 segments in blue and merged segments in red.
 
+### Generating a Closed Floorplan Polygon
+
+Connect small wall gaps, select the largest enclosed interior region, and fit
+a closed orthogonal polygon:
+
+```bash
+python scripts/generate_floorplan_polygon.py \
+    --wall-mask outputs/scene_name/wall_lines_baseline/wall_candidate_mask.npy \
+    --density outputs/scene_name/wall_density_baseline/density_wall_fused.npy \
+    --density-info outputs/scene_name/wall_density_baseline/density_info.json \
+    --output-dir outputs/scene_name/floorplan_polygon_baseline
+```
+
+`floorplan_polygon.json` contains pixel and reconstruction-coordinate vertices,
+area, and interior-region IoU. Since monocular reconstruction has no absolute
+metric scale by default, the reported world area is in reconstruction
+coordinate units squared rather than square meters.
+
 ### Performance & Memory
 
 #### Without FlashInfer (SDPA fallback)
