@@ -336,6 +336,24 @@ cross-height wall-density baseline that tolerates small alignment differences
 between height slices. The directory also contains each individual slice,
 cross-height support, raw count arrays, and a strict-consistency diagnostic.
 
+### Extracting Structured Wall Lines
+
+Extract a first set of Manhattan wall segments from the fused density:
+
+```bash
+python scripts/extract_wall_lines.py \
+    --density outputs/scene_name/wall_density_baseline/density_wall_fused.npy \
+    --support outputs/scene_name/wall_density_baseline/density_cross_height_support.npy \
+    --density-info outputs/scene_name/wall_density_baseline/density_info.json \
+    --output-dir outputs/scene_name/wall_lines_baseline
+```
+
+The baseline thresholds and cleans wall candidates, reduces thick wall bands
+to centerline skeletons, detects line segments with probabilistic Hough
+transform, and merges nearby Manhattan segments. `wall_lines.json` contains
+pixel and world-coordinate segments; `wall_lines_overlay.png` visualizes raw
+segments in blue and merged segments in red.
+
 ### Performance & Memory
 
 #### Without FlashInfer (SDPA fallback)
