@@ -47,6 +47,7 @@ from tqdm.auto import tqdm
 from lingbot_map.utils.pose_enc import pose_encoding_to_extri_intri
 from lingbot_map.utils.geometry import closed_form_inverse_se3_general
 from lingbot_map.utils.load_fn import load_and_preprocess_images
+from lingbot_map.utils.experiment_export import export_experiment_outputs
 
 
 # =============================================================================
@@ -413,6 +414,13 @@ def main():
                         help="Save sky mask visualizations (original | mask | overlay) to this directory")
     parser.add_argument("--export_preprocessed", type=str, default=None,
                         help="Export stride-sampled, resized/cropped images to this folder")
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="Export predictions.npz, images.npy, point_cloud.ply, "
+                             "trajectory files, and run_info.json to this directory")
+    parser.add_argument("--export_point_stride", type=int, default=4,
+                        help="Spatial stride used when exporting point_cloud.ply")
+    parser.add_argument("--no_viewer", action="store_true",
+                        help="Exit after inference/export instead of starting the Viser viewer")
 
     args = parser.parse_args()
     assert args.image_folder or args.video_path, \
@@ -561,7 +569,8 @@ def main():
                 output_device=output_device
             )
 
-    print(f"Inference done in {time.time() - t0:.1f}s")
+    inference_seconds = time.time() - t0
+    print(f"Inference done in {inference_seconds:.1f}s")
     if torch.cuda.is_available():
         print(
             f"GPU peak during inference: "
@@ -579,6 +588,33 @@ def main():
         images_for_post = images
 
     predictions, images_cpu = postprocess(predictions, images_for_post)
+
+    # ── Optional: export reproducible experiment artifacts ───────────────────
+    if args.output_dir:
+        print(f"Exporting experiment outputs to {args.output_dir}...")
+        run_config = vars(args).copy()
+        run_config["inference_seconds"] = inference_seconds
+        run_config["torch_version"] = torch.__version__
+        run_config["cuda_available"] = torch.cuda.is_available()
+        if torch.cuda.is_available():
+            run_config["gpu_name"] = torch.cuda.get_device_name(0)
+            run_config["peak_memory_gb"] = torch.cuda.max_memory_allocated() / 1e9
+        metadata = export_experiment_outputs(
+            args.output_dir,
+            predictions,
+            images_cpu,
+            paths,
+            run_config,
+            confidence_threshold=args.conf_threshold,
+            point_stride=args.export_point_stride,
+        )
+        print(
+            f"Exported {metadata['exports']['point_count']:,} points and "
+            f"{len(metadata['arrays'])} prediction arrays."
+        )
+
+    if args.no_viewer:
+        return
 
     # ── Visualize ────────────────────────────────────────────────────────────
     try:

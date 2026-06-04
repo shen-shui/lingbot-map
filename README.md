@@ -295,6 +295,31 @@ python demo.py --model_path /path/to/checkpoint.pt \
 | `--point_size` | `0.00001` | Point cloud point size |
 | `--downsample_factor` | `10` | Spatial downsampling for point cloud display |
 
+### Exporting Experiment Outputs
+
+Use `--output_dir` to save model predictions and downstream-reconstruction inputs.
+Add `--no_viewer` for headless or batch runs:
+
+```bash
+python demo.py --model_path /path/to/checkpoint.pt \
+    --image_folder /path/to/images/ --use_sdpa --offload_to_cpu \
+    --output_dir outputs/scene_name --no_viewer
+```
+
+The output directory contains:
+
+| File | Description |
+|:---|:---|
+| `predictions.npz` | Raw numeric predictions, including depth, confidence, world points, and camera parameters |
+| `images.npy` | Preprocessed RGB images as `uint8` |
+| `point_cloud.ply` | Confidence-filtered colored point cloud |
+| `trajectory.txt` | Camera-to-world trajectory |
+| `trajectory.png` | Top-view trajectory plot when Matplotlib is available |
+| `run_info.json` | Source paths, arguments, runtime, GPU, shapes, and export settings |
+
+Use `--export_point_stride` to control PLY density and `--conf_threshold` to
+control confidence filtering.
+
 ### Performance & Memory
 
 #### Without FlashInfer (SDPA fallback)

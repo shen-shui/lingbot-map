@@ -13,7 +13,8 @@ CLAUDE.md
 skyseg.onnx
 .claude-remote
 weights/
+checkpoints/
+outputs/
 .DS_Store
 **/.DS_Store
 docs/
-
