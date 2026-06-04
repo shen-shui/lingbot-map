@@ -372,6 +372,35 @@ area, and interior-region IoU. Since monocular reconstruction has no absolute
 metric scale by default, the reported world area is in reconstruction
 coordinate units squared rather than square meters.
 
+### Evaluating and Calibrating Floorplans
+
+Evaluate a predicted polygon against a ground-truth JSON that uses the same
+`image_shape` and `pixel_polygon` fields:
+
+```bash
+python scripts/evaluate_floorplan.py \
+    --prediction outputs/scene_name/floorplan_polygon_baseline/floorplan_polygon.json \
+    --ground-truth /path/to/ground_truth.json \
+    --output-dir outputs/scene_name/floorplan_evaluation
+```
+
+The evaluation reports region IoU, boundary precision/recall/F1, symmetric
+corner error, area relative error, and vertex-count error.
+
+To recover metric scale, provide one or more measured distances between polygon
+vertices. Each reference uses `FIRST_VERTEX:SECOND_VERTEX:LENGTH_METERS`:
+
+```bash
+python scripts/calibrate_floorplan_scale.py \
+    --floorplan outputs/scene_name/floorplan_polygon_baseline/floorplan_polygon.json \
+    --reference 2:3:2.40 \
+    --reference 8:9:1.15 \
+    --output outputs/scene_name/floorplan_polygon_baseline/floorplan_metric.json
+```
+
+Multiple references are combined using the median meters-per-reconstruction-unit
+scale. The calibrated output contains metric vertices and area in square meters.
+
 ### Performance & Memory
 
 #### Without FlashInfer (SDPA fallback)
