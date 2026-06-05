@@ -33,6 +33,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minimum-free-component-area", type=int, default=2000)
     parser.add_argument("--boundary-kernel", type=int, default=7)
     parser.add_argument("--approximation-epsilon", type=float, default=0.01)
+    parser.add_argument("--snap-boundary", action="store_true")
+    parser.add_argument("--snap-search-radius", type=int, default=18)
+    parser.add_argument("--snap-samples-per-edge", type=int, default=96)
     return parser.parse_args()
 
 
@@ -55,11 +58,16 @@ def main() -> None:
         minimum_free_component_area=args.minimum_free_component_area,
         boundary_kernel=args.boundary_kernel,
         approximation_epsilon=args.approximation_epsilon,
+        snap_boundary=args.snap_boundary,
+        snap_search_radius=args.snap_search_radius,
+        snap_samples_per_edge=args.snap_samples_per_edge,
     )
+    snapped = metadata["polygon"].get("snapped")
+    snapped_text = f", snapped_vertices={snapped['vertex_count']}" if snapped else ""
     print(
         f"Saved free-space map to {args.output_dir}; "
         f"rays={metadata['ray_count']}, free_pixels={metadata['free_pixels']}, "
-        f"vertices={metadata['polygon']['vertex_count']}"
+        f"vertices={metadata['polygon']['vertex_count']}{snapped_text}"
     )
 
 

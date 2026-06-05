@@ -113,6 +113,9 @@ def _extract_free_space_polygon(
     density: np.ndarray | None,
     output_dir: Path,
     approximation_epsilon: float,
+    snap_boundary: bool = False,
+    snap_search_radius: int = 18,
+    snap_samples_per_edge: int = 96,
 ) -> dict[str, Any]:
     contours, _ = cv2.findContours(free_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
@@ -120,8 +123,20 @@ def _extract_free_space_polygon(
     contour = max(contours, key=cv2.contourArea)
     perimeter = cv2.arcLength(contour, True)
     polygon = cv2.approxPolyDP(contour, approximation_epsilon * perimeter, True)[:, 0, :]
+    snapped_polygon = None
+    if snap_boundary and density is not None:
+        snapped_polygon = _snap_polygon_to_evidence(
+            polygon.astype(np.float32),
+            density,
+            search_radius=int(snap_search_radius),
+            samples_per_edge=int(snap_samples_per_edge),
+        )
     polygon_mask = np.zeros_like(free_mask, dtype=np.uint8)
     cv2.fillPoly(polygon_mask, [polygon.astype(np.int32)], 255)
+    snapped_mask = None
+    if snapped_polygon is not None:
+        snapped_mask = np.zeros_like(free_mask, dtype=np.uint8)
+        cv2.fillPoly(snapped_mask, [np.rint(snapped_polygon).astype(np.int32)], 255)
 
     if density is not None:
         gray = (255.0 * (1.0 - np.sqrt(np.clip(density, 0.0, 1.0)))).astype(np.uint8)
@@ -141,15 +156,144 @@ def _extract_free_space_polygon(
         draw.text((x + 4, y + 2), str(index), fill=(20, 20, 20, 255))
     image.convert("RGB").save(output_dir / "free_space_polygon_overlay.png")
     Image.fromarray(polygon_mask).save(output_dir / "free_space_polygon_mask.png")
-    return {
+    outputs = {
+        "polygon_overlay": "free_space_polygon_overlay.png",
+        "polygon_mask": "free_space_polygon_mask.png",
+    }
+    snapped_info = None
+    if snapped_polygon is not None and snapped_mask is not None:
+        _save_polygon_overlay(
+            output_dir / "snapped_free_space_polygon_overlay.png",
+            snapped_polygon,
+            density,
+            fill_color=(70, 150, 240, 70),
+        )
+        Image.fromarray(snapped_mask).save(output_dir / "snapped_free_space_polygon_mask.png")
+        outputs["snapped_polygon_overlay"] = "snapped_free_space_polygon_overlay.png"
+        outputs["snapped_polygon_mask"] = "snapped_free_space_polygon_mask.png"
+        snapped_info = {
+            "vertex_count": int(len(snapped_polygon)),
+            "area_pixels": float(cv2.contourArea(snapped_polygon.astype(np.float32))),
+            "polygon_pixel": snapped_polygon.astype(float).tolist(),
+        }
+    result = {
         "vertex_count": int(len(polygon)),
         "area_pixels": float(cv2.contourArea(polygon.astype(np.float32))),
         "polygon_pixel": polygon.astype(float).tolist(),
-        "outputs": {
-            "polygon_overlay": "free_space_polygon_overlay.png",
-            "polygon_mask": "free_space_polygon_mask.png",
-        },
+        "snapped": snapped_info,
+        "outputs": outputs,
     }
+    return result
+
+
+def _sample_evidence(evidence: np.ndarray, points: np.ndarray) -> np.ndarray:
+    height, width = evidence.shape
+    x = np.clip(np.rint(points[:, 0]).astype(np.int32), 0, width - 1)
+    y = np.clip(np.rint(points[:, 1]).astype(np.int32), 0, height - 1)
+    return evidence[y, x]
+
+
+def _line_from_points(start: np.ndarray, end: np.ndarray) -> tuple[float, float, float]:
+    direction = end - start
+    norm = float(np.linalg.norm(direction))
+    if norm < 1e-6:
+        return 0.0, 0.0, 0.0
+    a = direction[1] / norm
+    b = -direction[0] / norm
+    c = -(a * start[0] + b * start[1])
+    return float(a), float(b), float(c)
+
+
+def _intersect_lines(
+    first: tuple[float, float, float],
+    second: tuple[float, float, float],
+    fallback: np.ndarray,
+) -> np.ndarray:
+    a1, b1, c1 = first
+    a2, b2, c2 = second
+    det = a1 * b2 - a2 * b1
+    if abs(det) < 1e-6:
+        return fallback.astype(np.float32)
+    x = (b1 * c2 - b2 * c1) / det
+    y = (c1 * a2 - c2 * a1) / det
+    return np.asarray([x, y], dtype=np.float32)
+
+
+def _snap_polygon_to_evidence(
+    polygon: np.ndarray,
+    density: np.ndarray,
+    search_radius: int,
+    samples_per_edge: int,
+) -> np.ndarray:
+    if len(polygon) < 3 or search_radius <= 0:
+        return polygon
+    evidence = cv2.GaussianBlur(_normalize(density), (0, 0), sigmaX=2.0)
+    shifted_lines = []
+    shifted_endpoints = []
+    offsets = np.arange(-search_radius, search_radius + 1, dtype=np.float32)
+    for start, end in zip(polygon, np.roll(polygon, -1, axis=0)):
+        direction = end - start
+        length = float(np.linalg.norm(direction))
+        if length < 1e-6:
+            shifted_lines.append(_line_from_points(start, end))
+            shifted_endpoints.append((start, end))
+            continue
+        normal = np.asarray([-direction[1], direction[0]], dtype=np.float32) / length
+        t = np.linspace(0.0, 1.0, max(8, int(samples_per_edge)), dtype=np.float32)
+        base_samples = start[None, :] * (1.0 - t[:, None]) + end[None, :] * t[:, None]
+        best_offset = 0.0
+        best_score = -1.0
+        for offset in offsets:
+            samples = base_samples + normal[None, :] * offset
+            score = float(np.mean(_sample_evidence(evidence, samples)))
+            # Mildly prefer small movements when evidence is similar.
+            score -= 0.002 * abs(float(offset))
+            if score > best_score:
+                best_score = score
+                best_offset = float(offset)
+        snapped_start = start + normal * best_offset
+        snapped_end = end + normal * best_offset
+        shifted_endpoints.append((snapped_start, snapped_end))
+        shifted_lines.append(_line_from_points(snapped_start, snapped_end))
+
+    vertices = []
+    for index in range(len(shifted_lines)):
+        fallback = 0.5 * (
+            shifted_endpoints[index - 1][1] + shifted_endpoints[index][0]
+        )
+        vertices.append(_intersect_lines(shifted_lines[index - 1], shifted_lines[index], fallback))
+    snapped = np.asarray(vertices, dtype=np.float32)
+    height, width = density.shape
+    snapped[:, 0] = np.clip(snapped[:, 0], 0, width - 1)
+    snapped[:, 1] = np.clip(snapped[:, 1], 0, height - 1)
+    return snapped
+
+
+def _save_polygon_overlay(
+    output_path: Path,
+    polygon: np.ndarray,
+    density: np.ndarray | None,
+    fill_color: tuple[int, int, int, int],
+) -> None:
+    if density is not None:
+        gray = (255.0 * (1.0 - np.sqrt(np.clip(density, 0.0, 1.0)))).astype(np.uint8)
+        image = Image.fromarray(gray).convert("RGB")
+    else:
+        x_max = int(np.ceil(polygon[:, 0].max())) + 16
+        y_max = int(np.ceil(polygon[:, 1].max())) + 16
+        image = Image.new("RGB", (max(64, x_max), max(64, y_max)), "white")
+    fill = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    fill_draw = ImageDraw.Draw(fill)
+    fill_draw.polygon([tuple(point) for point in polygon], fill=fill_color)
+    image = Image.alpha_composite(image.convert("RGBA"), fill)
+    draw = ImageDraw.Draw(image)
+    closed = [tuple(point) for point in polygon] + [tuple(polygon[0])]
+    draw.line(closed, fill=(25, 85, 230, 255), width=4)
+    for index, point in enumerate(polygon):
+        x, y = (int(round(value)) for value in point)
+        draw.ellipse((x - 3, y - 3, x + 3, y + 3), fill=(220, 35, 35, 255))
+        draw.text((x + 4, y + 2), str(index), fill=(20, 20, 20, 255))
+    image.convert("RGB").save(output_path)
 
 
 def generate_free_space_floorplan(
@@ -169,6 +313,9 @@ def generate_free_space_floorplan(
     minimum_free_component_area: int = 2000,
     boundary_kernel: int = 7,
     approximation_epsilon: float = 0.01,
+    snap_boundary: bool = False,
+    snap_search_radius: int = 18,
+    snap_samples_per_edge: int = 96,
 ) -> dict[str, Any]:
     """Carve visible free-space from camera-to-depth rays and extract its boundary."""
     output_dir = Path(output_dir)
@@ -303,6 +450,9 @@ def generate_free_space_floorplan(
         density,
         output_dir,
         approximation_epsilon=float(approximation_epsilon),
+        snap_boundary=bool(snap_boundary),
+        snap_search_radius=int(snap_search_radius),
+        snap_samples_per_edge=int(snap_samples_per_edge),
     )
 
     metadata = {
@@ -323,6 +473,9 @@ def generate_free_space_floorplan(
             "minimum_free_component_area": int(minimum_free_component_area),
             "boundary_kernel": int(boundary_kernel),
             "approximation_epsilon": float(approximation_epsilon),
+            "snap_boundary": bool(snap_boundary),
+            "snap_search_radius": int(snap_search_radius),
+            "snap_samples_per_edge": int(snap_samples_per_edge),
         },
         "horizontal_axes": horizontal_axes,
         "horizontal_bounds": [lower.astype(float).tolist(), upper.astype(float).tolist()],
