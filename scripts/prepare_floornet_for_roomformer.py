@@ -87,6 +87,17 @@ def _points_to_density(
     return density.astype(np.float32)
 
 
+def _point_indices_to_density(point_indices: np.ndarray, image_size: int) -> np.ndarray:
+    valid = point_indices[np.logical_and(point_indices >= 0, point_indices < image_size * image_size)]
+    counts = np.zeros((image_size, image_size), dtype=np.uint32)
+    if valid.size:
+        y = valid // image_size
+        x = valid % image_size
+        np.add.at(counts, (y.astype(np.int32), x.astype(np.int32)), 1)
+    density = _normalize(np.log1p(counts))
+    return density.astype(np.float32)
+
+
 def _density_to_rgb(density: np.ndarray) -> np.ndarray:
     gray = (255.0 * (1.0 - np.sqrt(np.clip(density, 0.0, 1.0)))).astype(np.uint8)
     return np.repeat(gray[:, :, None], 3, axis=2)
@@ -166,6 +177,7 @@ def _convert_example(
     point_axes: tuple[int, int],
     flip_x: bool,
     flip_y: bool,
+    density_source: str,
     include_labels: set[int],
     exclude_labels: set[int],
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
@@ -173,7 +185,11 @@ def _convert_example(
     file_stem = f"{image_id:06d}_{scan_id.replace('/', '_')}"
     room_labels = _decode_label_mask(_bytes_feature(example, "room"))
     points = _float_feature(example, "points").reshape(-1, 3)
-    density = _points_to_density(points, image_size, bounds_margin, point_axes, flip_x, flip_y)
+    if density_source == "point_indices":
+        point_indices = _int64_feature(example, "point_indices")
+        density = _point_indices_to_density(point_indices, image_size)
+    else:
+        density = _points_to_density(points, image_size, bounds_margin, point_axes, flip_x, flip_y)
     polygons = _extract_room_polygons(
         room_labels,
         min_room_area,
@@ -237,6 +253,7 @@ def prepare_floornet_for_roomformer(
     point_axes: tuple[int, int] = (0, 1),
     flip_x: bool = False,
     flip_y: bool = False,
+    density_source: str = "point_indices",
     include_labels: set[int] | None = None,
     exclude_labels: set[int] | None = None,
 ) -> dict[str, Any]:
@@ -273,6 +290,7 @@ def prepare_floornet_for_roomformer(
             point_axes,
             flip_x,
             flip_y,
+            density_source,
             include_labels,
             exclude_labels,
         )
@@ -309,6 +327,7 @@ def prepare_floornet_for_roomformer(
             "point_axes": list(point_axes),
             "flip_x": bool(flip_x),
             "flip_y": bool(flip_y),
+            "density_source": density_source,
             "include_labels": sorted(include_labels),
             "exclude_labels": sorted(exclude_labels),
         },
@@ -333,6 +352,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--point-axes", type=_parse_axis_pair, default=(0, 1))
     parser.add_argument("--flip-x", action="store_true")
     parser.add_argument("--flip-y", action="store_true")
+    parser.add_argument(
+        "--density-source",
+        choices=("point_indices", "points"),
+        default="point_indices",
+        help="Use FloorNet raster point_indices by default; points mode projects raw xyz coordinates.",
+    )
     parser.add_argument("--include-labels", type=_parse_int_list, default=set())
     parser.add_argument("--exclude-labels", type=_parse_int_list, default={15, 16})
     return parser.parse_args()
@@ -352,6 +377,7 @@ def main() -> None:
         point_axes=args.point_axes,
         flip_x=args.flip_x,
         flip_y=args.flip_y,
+        density_source=args.density_source,
         include_labels=args.include_labels,
         exclude_labels=args.exclude_labels,
     )
