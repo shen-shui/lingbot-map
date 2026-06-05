@@ -46,8 +46,28 @@ def _normalize(values: np.ndarray, percentile: float = 99.0) -> np.ndarray:
     return np.clip(values / max(float(scale), 1e-8), 0.0, 1.0)
 
 
-def _points_to_density(points: np.ndarray, image_size: int, bounds_margin: float) -> np.ndarray:
-    horizontal = points[:, [0, 2]]
+def _parse_int_list(value: str) -> set[int]:
+    if not value:
+        return set()
+    return {int(item.strip()) for item in value.split(",") if item.strip()}
+
+
+def _parse_axis_pair(value: str) -> tuple[int, int]:
+    parts = [int(item.strip()) for item in value.split(",") if item.strip()]
+    if len(parts) != 2 or any(part not in {0, 1, 2} for part in parts) or parts[0] == parts[1]:
+        raise ValueError("--point-axes must contain two distinct axes from {0,1,2}, e.g. 0,1")
+    return parts[0], parts[1]
+
+
+def _points_to_density(
+    points: np.ndarray,
+    image_size: int,
+    bounds_margin: float,
+    point_axes: tuple[int, int],
+    flip_x: bool,
+    flip_y: bool,
+) -> np.ndarray:
+    horizontal = points[:, list(point_axes)]
     valid = np.isfinite(horizontal).all(axis=1)
     horizontal = horizontal[valid]
     lower = np.percentile(horizontal, 1, axis=0)
@@ -60,7 +80,9 @@ def _points_to_density(points: np.ndarray, image_size: int, bounds_margin: float
     keep = np.logical_and(xy >= 0, xy < image_size).all(axis=1)
     xy = xy[keep]
     counts = np.zeros((image_size, image_size), dtype=np.uint32)
-    np.add.at(counts, (image_size - 1 - xy[:, 1], xy[:, 0]), 1)
+    x = image_size - 1 - xy[:, 0] if flip_x else xy[:, 0]
+    y = xy[:, 1] if flip_y else image_size - 1 - xy[:, 1]
+    np.add.at(counts, (y, x), 1)
     density = _normalize(np.log1p(counts))
     return density.astype(np.float32)
 
@@ -74,9 +96,15 @@ def _extract_room_polygons(
     room_labels: np.ndarray,
     min_area: int,
     epsilon_ratio: float,
+    include_labels: set[int],
+    exclude_labels: set[int],
 ) -> list[dict[str, Any]]:
     polygons: list[dict[str, Any]] = []
     for room_label in sorted(int(value) for value in np.unique(room_labels) if value > 0):
+        if include_labels and room_label not in include_labels:
+            continue
+        if room_label in exclude_labels:
+            continue
         mask = (room_labels == room_label).astype(np.uint8)
         count, components, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
         for component_id in range(1, count):
@@ -135,13 +163,24 @@ def _convert_example(
     min_room_area: int,
     epsilon_ratio: float,
     bounds_margin: float,
+    point_axes: tuple[int, int],
+    flip_x: bool,
+    flip_y: bool,
+    include_labels: set[int],
+    exclude_labels: set[int],
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     scan_id = _bytes_feature(example, "image_path").decode("utf-8", errors="replace")
     file_stem = f"{image_id:06d}_{scan_id.replace('/', '_')}"
     room_labels = _decode_label_mask(_bytes_feature(example, "room"))
     points = _float_feature(example, "points").reshape(-1, 3)
-    density = _points_to_density(points, image_size, bounds_margin)
-    polygons = _extract_room_polygons(room_labels, min_room_area, epsilon_ratio)
+    density = _points_to_density(points, image_size, bounds_margin, point_axes, flip_x, flip_y)
+    polygons = _extract_room_polygons(
+        room_labels,
+        min_room_area,
+        epsilon_ratio,
+        include_labels,
+        exclude_labels,
+    )
 
     image_path = image_dir / f"{file_stem}.png"
     Image.fromarray(_density_to_rgb(density)).save(image_path)
@@ -175,6 +214,13 @@ def _convert_example(
         "file_name": image_path.name,
         "room_polygon_count": len(polygons),
         "room_labels": sorted(int(value) for value in np.unique(room_labels) if value > 0),
+        "used_room_labels": sorted(
+            int(value)
+            for value in np.unique(room_labels)
+            if value > 0
+            and (not include_labels or int(value) in include_labels)
+            and int(value) not in exclude_labels
+        ),
     }
     return image_record, annotations, summary
 
@@ -188,6 +234,11 @@ def prepare_floornet_for_roomformer(
     min_room_area: int = 80,
     epsilon_ratio: float = 0.005,
     bounds_margin: float = 0.05,
+    point_axes: tuple[int, int] = (0, 1),
+    flip_x: bool = False,
+    flip_y: bool = False,
+    include_labels: set[int] | None = None,
+    exclude_labels: set[int] | None = None,
 ) -> dict[str, Any]:
     import tensorflow as tf
 
@@ -198,6 +249,8 @@ def prepare_floornet_for_roomformer(
     image_dir.mkdir(parents=True, exist_ok=True)
     annotation_dir.mkdir(parents=True, exist_ok=True)
     overlay_dir.mkdir(parents=True, exist_ok=True)
+    include_labels = include_labels or set()
+    exclude_labels = exclude_labels if exclude_labels is not None else {15, 16}
 
     dataset = tf.data.TFRecordDataset(str(tfrecords_path))
     images = []
@@ -217,6 +270,11 @@ def prepare_floornet_for_roomformer(
             min_room_area,
             epsilon_ratio,
             bounds_margin,
+            point_axes,
+            flip_x,
+            flip_y,
+            include_labels,
+            exclude_labels,
         )
         images.append(image_record)
         annotations.extend(image_annotations)
@@ -248,6 +306,11 @@ def prepare_floornet_for_roomformer(
             "min_room_area": int(min_room_area),
             "epsilon_ratio": float(epsilon_ratio),
             "bounds_margin": float(bounds_margin),
+            "point_axes": list(point_axes),
+            "flip_x": bool(flip_x),
+            "flip_y": bool(flip_y),
+            "include_labels": sorted(include_labels),
+            "exclude_labels": sorted(exclude_labels),
         },
         "annotation_path": str(annotation_path),
         "examples": examples,
@@ -267,6 +330,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-room-area", type=int, default=80)
     parser.add_argument("--epsilon-ratio", type=float, default=0.005)
     parser.add_argument("--bounds-margin", type=float, default=0.05)
+    parser.add_argument("--point-axes", type=_parse_axis_pair, default=(0, 1))
+    parser.add_argument("--flip-x", action="store_true")
+    parser.add_argument("--flip-y", action="store_true")
+    parser.add_argument("--include-labels", type=_parse_int_list, default=set())
+    parser.add_argument("--exclude-labels", type=_parse_int_list, default={15, 16})
     return parser.parse_args()
 
 
@@ -281,6 +349,11 @@ def main() -> None:
         min_room_area=args.min_room_area,
         epsilon_ratio=args.epsilon_ratio,
         bounds_margin=args.bounds_margin,
+        point_axes=args.point_axes,
+        flip_x=args.flip_x,
+        flip_y=args.flip_y,
+        include_labels=args.include_labels,
+        exclude_labels=args.exclude_labels,
     )
     print(
         f"Converted {summary['image_count']} images and "
