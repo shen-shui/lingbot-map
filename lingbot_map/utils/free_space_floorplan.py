@@ -116,6 +116,7 @@ def _extract_free_space_polygon(
     snap_boundary: bool = False,
     snap_search_radius: int = 18,
     snap_samples_per_edge: int = 96,
+    orthogonalize_boundary: bool = False,
 ) -> dict[str, Any]:
     contours, _ = cv2.findContours(free_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
@@ -161,6 +162,7 @@ def _extract_free_space_polygon(
         "polygon_mask": "free_space_polygon_mask.png",
     }
     snapped_info = None
+    snapped_orthogonal_info = None
     if snapped_polygon is not None and snapped_mask is not None:
         _save_polygon_overlay(
             output_dir / "snapped_free_space_polygon_overlay.png",
@@ -176,11 +178,30 @@ def _extract_free_space_polygon(
             "area_pixels": float(cv2.contourArea(snapped_polygon.astype(np.float32))),
             "polygon_pixel": snapped_polygon.astype(float).tolist(),
         }
+        if orthogonalize_boundary:
+            orthogonal_polygon = _orthogonalize_polygon_edges(snapped_polygon)
+            orthogonal_mask = np.zeros_like(free_mask, dtype=np.uint8)
+            cv2.fillPoly(orthogonal_mask, [np.rint(orthogonal_polygon).astype(np.int32)], 255)
+            _save_polygon_overlay(
+                output_dir / "orthogonal_free_space_polygon_overlay.png",
+                orthogonal_polygon,
+                density,
+                fill_color=(245, 170, 40, 70),
+            )
+            Image.fromarray(orthogonal_mask).save(output_dir / "orthogonal_free_space_polygon_mask.png")
+            outputs["orthogonal_polygon_overlay"] = "orthogonal_free_space_polygon_overlay.png"
+            outputs["orthogonal_polygon_mask"] = "orthogonal_free_space_polygon_mask.png"
+            snapped_orthogonal_info = {
+                "vertex_count": int(len(orthogonal_polygon)),
+                "area_pixels": float(cv2.contourArea(orthogonal_polygon.astype(np.float32))),
+                "polygon_pixel": orthogonal_polygon.astype(float).tolist(),
+            }
     result = {
         "vertex_count": int(len(polygon)),
         "area_pixels": float(cv2.contourArea(polygon.astype(np.float32))),
         "polygon_pixel": polygon.astype(float).tolist(),
         "snapped": snapped_info,
+        "orthogonal": snapped_orthogonal_info,
         "outputs": outputs,
     }
     return result
@@ -296,6 +317,61 @@ def _save_polygon_overlay(
     image.convert("RGB").save(output_path)
 
 
+def _estimate_polygon_manhattan_angle(polygon: np.ndarray) -> float:
+    vectors = []
+    for start, end in zip(polygon, np.roll(polygon, -1, axis=0)):
+        delta = end - start
+        length = float(np.linalg.norm(delta))
+        if length < 1e-6:
+            continue
+        angle = np.arctan2(delta[1], delta[0])
+        vectors.append(length * np.exp(4j * angle))
+    if not vectors:
+        return 0.0
+    mean_vector = np.sum(vectors)
+    if abs(mean_vector) < 1e-8:
+        return 0.0
+    return float(np.angle(mean_vector) / 4.0)
+
+
+def _rotate_points(points: np.ndarray, center: np.ndarray, angle_radians: float) -> np.ndarray:
+    cos_a = float(np.cos(angle_radians))
+    sin_a = float(np.sin(angle_radians))
+    rotation = np.asarray([[cos_a, -sin_a], [sin_a, cos_a]], dtype=np.float32)
+    return (points - center) @ rotation.T + center
+
+
+def _orthogonalize_polygon_edges(polygon: np.ndarray) -> np.ndarray:
+    if len(polygon) < 4:
+        return polygon.astype(np.float32)
+    center = polygon.mean(axis=0)
+    angle = _estimate_polygon_manhattan_angle(polygon)
+    aligned = _rotate_points(polygon.astype(np.float32), center, -angle)
+    lines = []
+    for start, end in zip(aligned, np.roll(aligned, -1, axis=0)):
+        delta = end - start
+        if abs(float(delta[0])) >= abs(float(delta[1])):
+            y = 0.5 * (start[1] + end[1])
+            lines.append(("h", float(y), start, end))
+        else:
+            x = 0.5 * (start[0] + end[0])
+            lines.append(("v", float(x), start, end))
+    vertices = []
+    for previous, current in zip(np.roll(np.asarray(lines, dtype=object), 1, axis=0), lines):
+        if previous[0] == current[0]:
+            vertices.append(current[2])
+            continue
+        if previous[0] == "h":
+            x = current[1]
+            y = previous[1]
+        else:
+            x = previous[1]
+            y = current[1]
+        vertices.append([x, y])
+    orthogonal = np.asarray(vertices, dtype=np.float32)
+    return _rotate_points(orthogonal, center, angle)
+
+
 def generate_free_space_floorplan(
     predictions_path: str | Path,
     output_dir: str | Path,
@@ -316,6 +392,7 @@ def generate_free_space_floorplan(
     snap_boundary: bool = False,
     snap_search_radius: int = 18,
     snap_samples_per_edge: int = 96,
+    orthogonalize_boundary: bool = False,
 ) -> dict[str, Any]:
     """Carve visible free-space from camera-to-depth rays and extract its boundary."""
     output_dir = Path(output_dir)
@@ -453,6 +530,7 @@ def generate_free_space_floorplan(
         snap_boundary=bool(snap_boundary),
         snap_search_radius=int(snap_search_radius),
         snap_samples_per_edge=int(snap_samples_per_edge),
+        orthogonalize_boundary=bool(orthogonalize_boundary),
     )
 
     metadata = {
@@ -476,6 +554,7 @@ def generate_free_space_floorplan(
             "snap_boundary": bool(snap_boundary),
             "snap_search_radius": int(snap_search_radius),
             "snap_samples_per_edge": int(snap_samples_per_edge),
+            "orthogonalize_boundary": bool(orthogonalize_boundary),
         },
         "horizontal_axes": horizontal_axes,
         "horizontal_bounds": [lower.astype(float).tolist(), upper.astype(float).tolist()],

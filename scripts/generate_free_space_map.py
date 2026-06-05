@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--snap-boundary", action="store_true")
     parser.add_argument("--snap-search-radius", type=int, default=18)
     parser.add_argument("--snap-samples-per-edge", type=int, default=96)
+    parser.add_argument("--orthogonalize-boundary", action="store_true")
     return parser.parse_args()
 
 
@@ -61,13 +62,16 @@ def main() -> None:
         snap_boundary=args.snap_boundary,
         snap_search_radius=args.snap_search_radius,
         snap_samples_per_edge=args.snap_samples_per_edge,
+        orthogonalize_boundary=args.orthogonalize_boundary,
     )
     snapped = metadata["polygon"].get("snapped")
     snapped_text = f", snapped_vertices={snapped['vertex_count']}" if snapped else ""
+    orthogonal = metadata["polygon"].get("orthogonal")
+    orthogonal_text = f", orthogonal_vertices={orthogonal['vertex_count']}" if orthogonal else ""
     print(
         f"Saved free-space map to {args.output_dir}; "
         f"rays={metadata['ray_count']}, free_pixels={metadata['free_pixels']}, "
-        f"vertices={metadata['polygon']['vertex_count']}{snapped_text}"
+        f"vertices={metadata['polygon']['vertex_count']}{snapped_text}{orthogonal_text}"
     )
 
 
