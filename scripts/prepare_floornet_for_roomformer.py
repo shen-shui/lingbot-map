@@ -103,6 +103,10 @@ def _density_to_rgb(density: np.ndarray) -> np.ndarray:
     return np.repeat(gray[:, :, None], 3, axis=2)
 
 
+def _density_to_gray(density: np.ndarray) -> np.ndarray:
+    return (255.0 * (1.0 - np.sqrt(np.clip(density, 0.0, 1.0)))).astype(np.uint8)
+
+
 def _extract_room_polygons(
     room_labels: np.ndarray,
     min_area: int,
@@ -199,7 +203,7 @@ def _convert_example(
     )
 
     image_path = image_dir / f"{file_stem}.png"
-    Image.fromarray(_density_to_rgb(density)).save(image_path)
+    Image.fromarray(_density_to_gray(density), mode="L").save(image_path)
     _save_overlay(overlay_dir / f"{file_stem}_overlay.png", density, polygons)
 
     image_record = {
