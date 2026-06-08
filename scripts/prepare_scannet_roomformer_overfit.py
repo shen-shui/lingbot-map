@@ -22,6 +22,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scene-id", type=str, default="scene0000_00")
     parser.add_argument("--image-size", type=int, default=256)
     parser.add_argument("--mask-threshold", type=int, default=128)
+    parser.add_argument(
+        "--label-mode",
+        choices=["interior", "structure"],
+        default="interior",
+        help=(
+            "Use interior free-space polygons inferred from structure lines, or the raw "
+            "structure contours. RoomFormer expects room/interior polygons."
+        ),
+    )
+    parser.add_argument(
+        "--interior-fallback",
+        choices=["hull", "structure", "none"],
+        default="hull",
+        help="Fallback when no enclosed interior can be flood-filled from structure lines.",
+    )
     parser.add_argument("--close-kernel", type=int, default=9)
     parser.add_argument("--dilate-kernel", type=int, default=5)
     parser.add_argument("--dilate-iterations", type=int, default=1)
@@ -42,14 +57,71 @@ def load_structure_mask(path: Path, image_size: int, threshold: int) -> np.ndarr
 
 
 def mask_to_polygons(mask: np.ndarray, args: argparse.Namespace) -> list[dict[str, Any]]:
-    image = mask.astype(np.uint8)
+    if args.label_mode == "interior":
+        image = infer_interior_mask(mask, args)
+        polygons = binary_mask_to_polygons(image, args)
+        if polygons:
+            return polygons
+        if args.interior_fallback == "none":
+            return []
+        if args.interior_fallback == "hull":
+            hull = structure_hull_mask(mask, args)
+            return binary_mask_to_polygons(hull, args)
+        image = mask.astype(np.uint8)
+    else:
+        image = mask.astype(np.uint8)
+
+    return binary_mask_to_polygons(image, args)
+
+
+def infer_interior_mask(structure_mask: np.ndarray, args: argparse.Namespace) -> np.ndarray:
+    """Infer weak interior polygons from projected structure lines.
+
+    ScanNet gives a structural line/mask cue, while RoomFormer is trained to output
+    filled room polygons. For an overfit sanity check, close and thicken structure
+    lines, flood-fill exterior background from the image border, then keep enclosed
+    free-space components as weak room/interior labels.
+    """
+    walls = structure_mask.astype(np.uint8)
     if args.close_kernel > 1:
         kernel = np.ones((args.close_kernel, args.close_kernel), dtype=np.uint8)
-        image = cv2.morphologyEx(image, cv2.MORPH_CLOSE, kernel)
+        walls = cv2.morphologyEx(walls, cv2.MORPH_CLOSE, kernel)
     if args.dilate_kernel > 1 and args.dilate_iterations > 0:
         kernel = np.ones((args.dilate_kernel, args.dilate_kernel), dtype=np.uint8)
-        image = cv2.dilate(image, kernel, iterations=args.dilate_iterations)
+        walls = cv2.dilate(walls, kernel, iterations=args.dilate_iterations)
 
+    free = (walls == 0).astype(np.uint8)
+    flood = free.copy()
+    height, width = flood.shape
+    flood_mask = np.zeros((height + 2, width + 2), dtype=np.uint8)
+    for x in range(width):
+        if flood[0, x]:
+            cv2.floodFill(flood, flood_mask, (x, 0), 2)
+        if flood[height - 1, x]:
+            cv2.floodFill(flood, flood_mask, (x, height - 1), 2)
+    for y in range(height):
+        if flood[y, 0]:
+            cv2.floodFill(flood, flood_mask, (0, y), 2)
+        if flood[y, width - 1]:
+            cv2.floodFill(flood, flood_mask, (width - 1, y), 2)
+    return (flood == 1).astype(np.uint8)
+
+
+def structure_hull_mask(structure_mask: np.ndarray, args: argparse.Namespace) -> np.ndarray:
+    points = np.column_stack(np.nonzero(structure_mask.astype(bool)))
+    if len(points) < 3:
+        return np.zeros_like(structure_mask, dtype=np.uint8)
+    xy = points[:, ::-1].astype(np.int32)
+    hull = cv2.convexHull(xy)
+    mask = np.zeros_like(structure_mask, dtype=np.uint8)
+    cv2.fillPoly(mask, [hull], 1)
+    if args.dilate_kernel > 1 and args.dilate_iterations > 0:
+        kernel = np.ones((args.dilate_kernel, args.dilate_kernel), dtype=np.uint8)
+        mask = cv2.erode(mask, kernel, iterations=max(1, args.dilate_iterations))
+    return mask
+
+
+def binary_mask_to_polygons(image: np.ndarray, args: argparse.Namespace) -> list[dict[str, Any]]:
     contours, _ = cv2.findContours(image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     polygons = []
     for contour in sorted(contours, key=cv2.contourArea, reverse=True):
@@ -152,6 +224,7 @@ def main() -> None:
         "scene_id": args.scene_id,
         "density": str(args.density),
         "structure_mask": str(args.structure_mask),
+        "label_mode": args.label_mode,
         "image_size": int(args.image_size),
         "polygon_count": int(len(polygons)),
         "areas": [float(item["area"]) for item in polygons],
